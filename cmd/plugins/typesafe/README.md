@@ -6,9 +6,11 @@ Adds TypeSafe System One models (such as Jev) to CLIProxyAPI.
   is TypeSafe's System One request and is forwarded unchanged.
 - The proxy picks a TypeSafe key in rotation. A key that TypeSafe rejects (401/403),
   rate limits (429) or fails on (5xx) is cooled down and the request moves to the next key.
-- Each key gets a card under Quota Management (Plugin tab): model count, plus requests
-  and tokens sent through the proxy since it last started. TypeSafe's API reports no
-  plan, balance or limits, so the card cannot show them.
+- The plugin's quota route reports each key's model count, plus requests and tokens
+  sent through the proxy since it last started. TypeSafe's API reports no plan,
+  balance or limits, so none are shown. The management panel shows this on the
+  Dashboard (TypeSafe section) rather than the Quota page; a stock panel shows it as a
+  Plugin card under Quota Management.
 - Not supported with CLIProxyAPIHome dispatch enabled (the route uses local key selection).
 
 ## Build

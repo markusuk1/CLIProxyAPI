@@ -20,7 +20,7 @@ import (
 
 const (
 	providerID     = "typesafe"
-	pluginVersion  = "1.0.0"
+	pluginVersion  = "1.0.1"
 	defaultBaseURL = "https://api.typesafe.ai"
 	systemOnePath  = "/v1/systemone"
 	modelsPath     = "/v1/models"
@@ -197,13 +197,10 @@ func authData(cred credential, raw []byte, fileName string) (pluginapi.AuthData,
 	if label == "" {
 		label = "TypeSafe key " + keyHint(cred.APIKey)
 	}
-	id := strings.TrimSpace(fileName)
-	if id == "" {
-		id = providerID
-	}
+	// ID stays empty so the host derives its canonical per-path ID; loaders pass
+	// file names in different forms, which would otherwise register one key twice.
 	return pluginapi.AuthData{
 		Provider:    providerID,
-		ID:          id,
 		FileName:    fileName,
 		Label:       label,
 		Disabled:    cred.Disabled,

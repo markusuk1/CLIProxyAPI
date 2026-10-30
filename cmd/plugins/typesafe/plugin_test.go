@@ -90,7 +90,7 @@ func TestParseAuthAcceptsTypesafeKeyFile(t *testing.T) {
 	if !resp.Handled {
 		t.Fatal("TypeSafe file was not handled")
 	}
-	if resp.Auth.Provider != providerID || resp.Auth.ID != "typesafe-main.json" {
+	if resp.Auth.Provider != providerID || resp.Auth.ID != "" || resp.Auth.FileName != "typesafe-main.json" {
 		t.Fatalf("auth = %+v", resp.Auth)
 	}
 	if resp.Auth.Label != "TypeSafe key …1234" {

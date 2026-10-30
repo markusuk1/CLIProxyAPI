@@ -9,13 +9,14 @@ Adds TypeSafe System One models (such as Jev) to CLIProxyAPI.
 - Each key gets a card under Quota Management (Plugin tab): model count, plus requests
   and tokens sent through the proxy since it last started. TypeSafe's API reports no
   plan, balance or limits, so the card cannot show them.
+- Not supported with CLIProxyAPIHome dispatch enabled (the route uses local key selection).
 
 ## Build
 
 Needs cgo (a C compiler on `PATH`).
 
 ```bash
-go build -buildmode=c-shared -o plugins/windows/amd64/typesafe-v1.0.0.dll ./cmd/plugins/typesafe
+go build -buildmode=c-shared -o plugins/windows/amd64/typesafe-v1.0.1.dll ./cmd/plugins/typesafe
 ```
 
 Use `.so` on Linux and `.dylib` on macOS, under `plugins/<os>/<arch>/`. Then enable it:

@@ -2,6 +2,7 @@ package api
 
 import (
 	"context"
+	"errors"
 	"io"
 	"net/http"
 	"net/http/httptest"
@@ -17,6 +18,7 @@ import (
 type typesafeCaptureExecutor struct {
 	statusByAuth map[string]int
 	bodyByAuth   map[string]string
+	errByAuth    map[string]error
 	authIDs      []string
 	urls         []string
 	bodies       []string
@@ -41,12 +43,18 @@ func (e *typesafeCaptureExecutor) CountTokens(context.Context, *auth.Auth, coree
 	return coreexecutor.Response{}, nil
 }
 
-func (e *typesafeCaptureExecutor) HttpRequest(_ context.Context, selected *auth.Auth, req *http.Request) (*http.Response, error) {
+func (e *typesafeCaptureExecutor) HttpRequest(ctx context.Context, selected *auth.Auth, req *http.Request) (*http.Response, error) {
 	body, err := io.ReadAll(req.Body)
 	if err != nil {
 		return nil, err
 	}
 	e.authIDs = append(e.authIDs, selected.ID)
+	if errCtx := ctx.Err(); errCtx != nil {
+		return nil, errCtx
+	}
+	if errAuth := e.errByAuth[selected.ID]; errAuth != nil {
+		return nil, errAuth
+	}
 	e.urls = append(e.urls, req.URL.String())
 	e.bodies = append(e.bodies, string(body))
 	e.headers = append(e.headers, req.Header.Clone())
@@ -243,5 +251,41 @@ func TestTypesafeUsageDetail(t *testing.T) {
 	}
 	if empty := typesafeUsageDetail([]byte(`not json`)); empty.TotalTokens != 0 {
 		t.Fatalf("invalid body detail = %+v, want zero", empty)
+	}
+}
+
+func TestTypesafeSystemOneClientCancelDoesNotCoolKeys(t *testing.T) {
+	server := newTestServer(t)
+	executor := &typesafeCaptureExecutor{}
+	server.handlers.AuthManager.RegisterExecutor(executor)
+	registerTypesafeAuths(t, server, newTypesafeAuth("typesafe-a.json", nil), newTypesafeAuth("typesafe-b.json", nil))
+
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel()
+	req := httptest.NewRequest(http.MethodPost, "/v1/systemone", strings.NewReader(`{"model":"jev-latest"}`)).WithContext(ctx)
+	req.Header.Set("Authorization", "Bearer test-key")
+	rr := httptest.NewRecorder()
+	server.engine.ServeHTTP(rr, req)
+
+	if len(executor.authIDs) != 1 {
+		t.Fatalf("attempts = %v, want one attempt before noticing the client left", executor.authIDs)
+	}
+	for _, id := range []string{"typesafe-a.json", "typesafe-b.json"} {
+		if current, ok := server.handlers.AuthManager.GetByID(id); !ok || !current.NextRetryAfter.IsZero() || current.Unavailable {
+			t.Fatalf("key %s was penalised for a client disconnect: %+v", id, current)
+		}
+	}
+}
+
+func TestTypesafeSystemOneRotatesPastTransportError(t *testing.T) {
+	server := newTestServer(t)
+	executor := &typesafeCaptureExecutor{errByAuth: map[string]error{"typesafe-a.json": errors.New("read tcp: connection reset by peer")}}
+	server.handlers.AuthManager.RegisterExecutor(executor)
+	registerTypesafeAuths(t, server, newTypesafeAuth("typesafe-a.json", nil), newTypesafeAuth("typesafe-b.json", nil))
+
+	for i := 0; i < 2; i++ {
+		if rr := serveSystemOne(server, `{"model":"jev-latest"}`, nil); rr.Code != http.StatusOK {
+			t.Fatalf("request %d status = %d, want 200 from the healthy key; attempts=%v body=%s", i, rr.Code, executor.authIDs, rr.Body.String())
+		}
 	}
 }

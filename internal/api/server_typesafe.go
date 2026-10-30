@@ -27,14 +27,18 @@ const (
 	typesafeProvider = "typesafe"
 	// typesafeDefaultBaseURL is used when a credential does not set base_url.
 	typesafeDefaultBaseURL = "https://api.typesafe.ai"
-	// typesafeMaxBodyBytes mirrors TypeSafe's documented 32 MiB request body cap and
-	// also bounds how much of an upstream response is buffered.
+	// typesafeMaxBodyBytes mirrors TypeSafe's documented 32 MiB request body cap. Larger
+	// upstream responses are refused rather than truncated.
 	typesafeMaxBodyBytes = 32 << 20
 )
 
 // typesafeSystemOne forwards a TypeSafe System One request (for example to Jev)
 // unchanged to a TypeSafe credential. A credential that is rejected, rate limited or
 // failing upstream is marked and the request moves on to the next credential.
+//
+// Like /v1/alpha/search this is a raw pass-through, not a model executor path: the
+// body is a typed-decision request, so payload rules are not applied. Home dispatch
+// is not supported; SelectAuth reports home_unavailable when Home is enabled.
 func (s *Server) typesafeSystemOne(c *gin.Context) {
 	if s == nil || s.handlers == nil || s.handlers.AuthManager == nil {
 		c.JSON(http.StatusServiceUnavailable, gin.H{"error": "TypeSafe auth manager unavailable"})
@@ -105,12 +109,25 @@ func (s *Server) typesafeSystemOne(c *gin.Context) {
 		reporter := helps.NewUsageReporter(ctx, typesafeProvider, model, selected)
 		if errAttempt != nil {
 			helps.RecordAPIResponseError(ctx, cfg, errAttempt)
+			if errCtx := ctx.Err(); errCtx != nil {
+				// The client went away; that says nothing about the credential, and
+				// every further attempt would fail the same way.
+				c.JSON(clienterror.HTTPStatusFromErrorOr(errCtx, http.StatusRequestTimeout), gin.H{"error": errCtx.Error()})
+				return
+			}
 			reporter.PublishFailure(ctx, errAttempt)
+			// Only an explicit status is attached, so the manager can classify
+			// transport errors from the message instead of cooling the key as a 5xx.
+			attemptErr := &auth.Error{Message: errAttempt.Error()}
+			var statusErr interface{ StatusCode() int }
+			if errors.As(errAttempt, &statusErr) {
+				attemptErr.HTTPStatus = statusErr.StatusCode()
+			}
 			manager.MarkResult(ctx, auth.Result{
 				AuthID:   selected.ID,
 				Provider: typesafeProvider,
 				Success:  false,
-				Error:    &auth.Error{Code: "upstream_error", Message: errAttempt.Error(), Retryable: true, HTTPStatus: http.StatusBadGateway},
+				Error:    attemptErr,
 			})
 			last = &typesafeUpstreamResult{err: errAttempt}
 			continue
@@ -199,10 +216,13 @@ func (s *Server) typesafeAttempt(ctx context.Context, selected *auth.Auth, body 
 		}
 	}()
 	helps.RecordAPIResponseMetadata(ctx, cfg, resp.StatusCode, resp.Header.Clone())
-	respBody, errRead := io.ReadAll(io.LimitReader(resp.Body, typesafeMaxBodyBytes))
+	respBody, errRead := io.ReadAll(io.LimitReader(resp.Body, typesafeMaxBodyBytes+1))
 	helps.AppendAPIResponseChunk(ctx, cfg, respBody)
 	if errRead != nil {
 		return nil, fmt.Errorf("read TypeSafe response: %w", errRead)
+	}
+	if len(respBody) > typesafeMaxBodyBytes {
+		return nil, errors.New("TypeSafe response exceeds 32 MiB")
 	}
 	return &typesafeUpstreamResult{status: resp.StatusCode, headers: resp.Header.Clone(), body: respBody}, nil
 }

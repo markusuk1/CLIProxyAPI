@@ -37,6 +37,7 @@ CLAUDE_USAGE = "https://api.anthropic.com/api/oauth/usage"
 CODEX_USAGE = "https://chatgpt.com/backend-api/wham/usage"
 OUTBOX = Path(os.environ.get("QUOTA_OUTBOX_PATH", str(ROOT / "bin" / "quota-outbox.sqlite3")))
 STREAM_PORT = int(os.environ.get("QUOTA_STREAM_PORT", "8318"))
+MAX_WHAT_IF_AGENTS = 10_000
 
 
 def account_id(auth_index: str, provider: str = "claude") -> str:
@@ -79,6 +80,8 @@ def ensure_schema(db: sqlite3.Connection) -> None:
                            ("cache_read_tokens", "INTEGER"), ("cache_creation_tokens", "INTEGER")):
             if name not in columns:
                 db.execute(f"ALTER TABLE usage_event ADD COLUMN {name} {kind}")
+        db.execute("CREATE INDEX IF NOT EXISTS usage_event_account_minute ON usage_event (account, minute)")
+        db.execute("CREATE INDEX IF NOT EXISTS observation_account_time ON observation (account, observed_at)")
 
 
 def session_text(value: object) -> str | None:
@@ -109,7 +112,8 @@ def parse_forecast_query(query: str) -> tuple[list[Account], dict[str, int]]:
     for provider in ("claude", "codex"):
         if f"agents.{provider}" in params:
             agents[provider] = int(params[f"agents.{provider}"][0])
-            if agents[provider] < 0:
+            # Input sanity, not a work limit: the simulation cost does not depend on the count.
+            if not 0 <= agents[provider] <= MAX_WHAT_IF_AGENTS:
                 raise ValueError("invalid agents")
     return accounts, agents
 
@@ -235,7 +239,7 @@ class Bridge:
                         max(0, int(tokens.get("cache_read_tokens") or tokens.get("cached_tokens") or 0)),
                         max(0, int(tokens.get("cache_creation_tokens") or 0)),
                     ))
-                except (KeyError, TypeError, ValueError):
+                except (KeyError, TypeError, ValueError, AttributeError):
                     continue
 
     def collect_quota(self) -> bool:
@@ -466,7 +470,8 @@ class Bridge:
                     limited = self.collect_quota()
                     next_quota = time.monotonic() + (3600 if limited else 900)
                 self.publish()
-            except (OSError, ValueError, KeyError, RuntimeError, wsbus.WsError, wsbus.WsProcedureError) as error:
+            except (OSError, ValueError, KeyError, RuntimeError, sqlite3.Error,
+                    wsbus.WsError, wsbus.WsProcedureError) as error:
                 self.log(f"quota bridge: {type(error).__name__}: {error}")
             time.sleep(10)
 

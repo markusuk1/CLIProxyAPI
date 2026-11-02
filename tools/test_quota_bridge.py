@@ -211,6 +211,10 @@ class UsageSessionTest(unittest.TestCase):
         row = self.record(tokens={"input_tokens": 10, "output_tokens": 5, "cached_tokens": 700})
         self.assertEqual(row[2], 700)
 
+    def test_malformed_record_is_skipped_not_fatal(self):
+        self.assertIsNone(self.record(tokens="not an object"))
+        self.assertIsNone(self.record(timestamp=12345))
+
     def test_unusable_session_ids_are_dropped_not_guessed(self):
         self.assertEqual(self.record(session_id="x" * 200, parent_session_id=5)[:2], (None, None))
 
@@ -238,7 +242,8 @@ class ForecastQueryParsingTest(unittest.TestCase):
         for query in ("", "accounts=[]", "accounts=nope", "accounts=" + json.dumps([{"provider": "gemini", "auth_index": "a"}]),
                       "accounts=" + json.dumps([{"provider": "claude", "auth_index": ""}]),
                       "accounts=" + json.dumps([{"provider": "claude", "auth_index": "a"}]) + "&agents.codex=-1",
-                      "accounts=" + json.dumps([{"provider": "claude", "auth_index": "a"}]) + "&agents.claude=many"):
+                      "accounts=" + json.dumps([{"provider": "claude", "auth_index": "a"}]) + "&agents.claude=many",
+                      "accounts=" + json.dumps([{"provider": "claude", "auth_index": "a"}]) + "&agents.claude=1" + "0" * 400):
             with self.subTest(query=query):
                 with self.assertRaises((ValueError, TypeError)):
                     parse_forecast_query(query)

@@ -42,10 +42,16 @@ class CalibrationTest(unittest.TestCase):
         self.assertIsNone(cost)
 
     def test_fable_window_learns_only_from_fable_tokens(self):
-        readings = steady("a", "seven_day_fable", NOW - 2 * HOUR, 2, 50, NOW + WEEK)
-        usage = traffic("a", NOW - 2 * HOUR, 2, 6_000_000) + traffic("a", NOW - 2 * HOUR, 2, 600_000, "claude-fable-5-1")
+        readings = steady("a", "seven_day_fable", NOW - 4 * HOUR, 4, 100, NOW + WEEK)
+        usage = traffic("a", NOW - 4 * HOUR, 4, 6_000_000) + traffic("a", NOW - 4 * HOUR, 4, 600_000, "claude-fable-5-1")
         cost, _ = calibrate(readings, TokenIndex(usage), "a", "seven_day_fable")
-        self.assertAlmostEqual(cost, 50 / 600_000, delta=1e-6)
+        self.assertAlmostEqual(cost, 100 / 600_000, delta=1e-6)
+
+    def test_a_point_or_two_against_huge_traffic_is_not_a_cost(self):
+        readings = [Reading("a", "five_hour", 0, NOW + HOUR, NOW - 2 * HOUR),
+                    Reading("a", "five_hour", 100, NOW + HOUR, NOW - HOUR)]
+        cost, _ = calibrate(readings, TokenIndex(traffic("a", NOW - 2 * HOUR, 1, 300_000_000)), "a", "five_hour")
+        self.assertIsNone(cost)
 
 
 class CurrentWindowTest(unittest.TestCase):
@@ -122,6 +128,55 @@ class PoolTest(unittest.TestCase):
         self.assertEqual(pool["status"], "learning")  # its 5-hour cost is unknown, so it says so
 
 
+class ReviewRegressionTest(unittest.TestCase):
+    """Cases from the 2026-11-02 review that made the forecast too hopeful or wrong."""
+
+    def setUp(self):
+        start = NOW - 6 * HOUR
+        self.readings = steady("a", "seven_day", start, 6, 100, NOW + 3 * 86400, start_bp=7_400)
+        self.usage = traffic("a", start, 6, 1_000_000)
+
+    def test_account_without_readings_is_not_limitless_capacity(self):
+        alone = forecast_pool("claude", [Account("a", "claude", "A")], self.readings, self.usage, NOW)
+        both = forecast_pool("claude", [Account("a", "claude", "A"), Account("b", "claude", "B")],
+                             self.readings, self.usage, NOW)
+        self.assertEqual(both["dry_from"], alone["dry_from"])
+        self.assertEqual(both["no_readings"], ["B"])
+
+    def test_out_account_with_unmeasured_limit_blocks_a_hopeful_forecast(self):
+        readings = self.readings + [Reading("c", "five_hour", FULL, NOW + 2 * HOUR, NOW - 60)]
+        pool = forecast_pool("claude", [Account("a", "claude", "A"), Account("c", "claude", "C")],
+                             readings, self.usage, NOW)
+        self.assertEqual(pool["status"], "learning")
+        self.assertEqual(pool["learning"], ["C"])
+
+    def test_out_account_comes_back_only_when_every_full_limit_resets(self):
+        readings = self.readings + [Reading("c", "five_hour", FULL, NOW + 2 * HOUR, NOW - 60),
+                                    Reading("c", "seven_day", FULL, NOW + 72 * HOUR, NOW - 60)]
+        pool = forecast_pool("claude", [Account("a", "claude", "A"), Account("c", "claude", "C")],
+                             readings, self.usage, NOW)
+        (c,) = [x for x in pool["accounts"] if x["label"] == "C"]
+        self.assertEqual(c["back_at"], NOW + 72 * HOUR)
+
+    def test_traffic_before_a_reset_is_not_charged_to_the_new_window(self):
+        # Last readings an hour ago (the bridge polls hourly when limited); the 5-hour window
+        # reset half an hour ago; traffic stopped at the reset.
+        five = steady("a", "five_hour", NOW - 3 * HOUR, 2, 2_000, NOW - HOUR // 2)
+        week = steady("a", "seven_day", NOW - 3 * HOUR, 2, 100, NOW + WEEK)
+        usage = traffic("a", NOW - 3 * HOUR, 2.5, 1_000_000)
+        pool = forecast_pool("claude", [Account("a", "claude", "A")], five + week, usage, NOW)
+        (five,) = [w for w in pool["accounts"][0]["windows"] if w["window"] == "five_hour"]
+        self.assertEqual(five["used_percent"], 0.0)
+
+    def test_a_window_that_sat_still_recently_still_has_a_cost(self):
+        rising = steady("a", "seven_day", NOW - 8 * HOUR, 4, 100, NOW + WEEK)
+        flat = [Reading("a", "seven_day", rising[-1].used, NOW + WEEK, rising[-1].observed_at + i * 900)
+                for i in range(1, 17)]
+        usage = traffic("a", NOW - 8 * HOUR, 8, 1_000_000)
+        cost, _ = calibrate(rising + flat, TokenIndex(usage), "a", "seven_day")
+        self.assertIsNotNone(cost)
+
+
 class ForecastQueryTest(unittest.TestCase):
     def test_reads_from_sqlite_outbox(self):
         db = sqlite3.connect(":memory:")
@@ -132,10 +187,10 @@ class ForecastQueryTest(unittest.TestCase):
             CREATE TABLE usage_event (id TEXT, account TEXT, model TEXT, minute INTEGER,
               input_tokens INTEGER, output_tokens INTEGER, session_id TEXT, parent_session_id TEXT);
         """)
-        for i, r in enumerate(steady("a", "seven_day", NOW - 2 * HOUR, 2, 100, NOW + WEEK)):
+        for i, r in enumerate(steady("a", "seven_day", NOW - 4 * HOUR, 4, 100, NOW + WEEK)):
             db.execute("INSERT INTO observation VALUES (?,?,?,?,?,?,0)",
                        (str(i), r.account, r.window, r.used, r.reset_at, r.observed_at))
-        for i, u in enumerate(traffic("a", NOW - 2 * HOUR, 2, 1_000_000)):
+        for i, u in enumerate(traffic("a", NOW - 4 * HOUR, 4, 1_000_000)):
             db.execute("INSERT INTO usage_event VALUES (?,?,?,?,?,0,'child','lead')",
                        (str(i), u.account, u.model, u.minute, u.tokens))
         result = forecast(db, [Account("a", "claude", "A", "plan_ultra")], NOW)

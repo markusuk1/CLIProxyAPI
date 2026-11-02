@@ -35,6 +35,8 @@ AGENT_ACTIVE = 30 * 60
 # Back-tested on 29 Oct-2 Nov 2026 history: the last 16 pairs (about four active hours
 # at one reading per 15 minutes) halved the 12-hour error against using all history.
 CALIBRATION_PAIRS = 16
+# Least movement (basis points) a cost may rest on; readings come in whole percents.
+MIN_SPENT = 300
 
 PERIOD = {"five_hour": 5 * HOUR, "seven_day": 7 * 86400, "weekly": 7 * 86400,
           "seven_day_fable": 7 * 86400, "seven_day_opus": 7 * 86400}
@@ -153,11 +155,21 @@ def calibrate(readings: list[Reading], index: TokenIndex, account: str, window: 
     # Cost per token drifts between windows (model and cache mix), so recent pairs win.
     recent = pairs[-CALIBRATION_PAIRS:]
     spent, tokens = sum(p[0] for p in recent), sum(p[1] for p in recent)
-    return (spent / tokens if tokens and spent else None), unexplained
+    if tokens and spent < MIN_SPENT:
+        # Readings move in whole percents; a slow window can sit still for a while,
+        # so look further back before calling the cost unknown.
+        spent, tokens = sum(p[0] for p in pairs), sum(p[1] for p in pairs)
+    # A point or two of movement against a huge token count is rounding noise, not a
+    # cost; trusting it would make the window look as if it never fills.
+    return (spent / tokens if tokens and spent >= MIN_SPENT else None), unexplained
 
 
 def current_windows(readings: list[Reading], account: str, now: int) -> list[Reading]:
-    """Latest reading per window from the account's newest usage response, rolled past resets."""
+    """Latest reading per window from the account's newest usage response, rolled past resets.
+
+    A rolled window's observed_at becomes the start of its current cycle, so traffic sent
+    before the reset is not charged to the fresh window.
+    """
     mine = [r for r in readings if r.account == account]
     if not mine:
         return []
@@ -170,12 +182,13 @@ def current_windows(readings: list[Reading], account: str, now: int) -> list[Rea
     for r in latest.values():
         if r.window not in PERIOD:
             continue
-        reset_at, used = r.reset_at, r.used
+        reset_at, used, since = r.reset_at, r.used, r.observed_at
         if reset_at and reset_at <= now:
             used = 0
             while reset_at <= now:
                 reset_at += PERIOD[r.window]
-        rolled.append(Reading(account, r.window, used, reset_at, r.observed_at))
+            since = reset_at - PERIOD[r.window]
+        rolled.append(Reading(account, r.window, used, reset_at, since))
     return rolled
 
 
@@ -274,19 +287,24 @@ def forecast_pool(provider: str, accounts: list[Account], readings: list[Reading
     else:
         demand_source, demand = "none", None
 
-    learning = [s.meta.label for s in sims if s.available() and any(
-        w.cost is None for w in s.windows if w.window in GATING)]
+    # An account with no readings has unknown capacity: leave it out rather than treat it
+    # as limitless. An unmeasured limit makes the forecast unknown even while the account
+    # is out, because it starts filling again after the reset.
+    no_readings = [s.meta.label for s in sims if not s.windows]
+    sims = [s for s in sims if s.windows]
+    learning = [s.meta.label for s in sims if any(w.cost is None for w in s.windows if w.window in GATING)]
     available_now = {s.meta.account: s.available() for s in sims}
+    for sim in sims:
+        if not sim.available():
+            # Back only when every full limit has reset.
+            sim.back_at = max((w.reset_at for w in sim.windows if w.window in GATING and w.used >= FULL),
+                              default=None) or None
     # The simulation mutates window state; report the state as of now.
     windows_now = {s.meta.account: [{"window": w.window, "used_percent": round(w.used / 100, 1),
                                      "reset_at": w.reset_at, "cost_source": w.cost_source or None}
                                     for w in s.windows] for s in sims}
     dry_from = dry_until = None
-    if demand is not None and not learning:
-        for sim in sims:
-            if not sim.available():
-                sim.back_at = min((w.reset_at for w in sim.windows if w.window in GATING and w.used >= FULL),
-                                  default=None)
+    if demand is not None and not learning and sims:
         for at in range(now, now + HORIZON, STEP):
             for sim in sims:
                 was_out = not sim.available()
@@ -323,6 +341,7 @@ def forecast_pool(provider: str, accounts: list[Account], readings: list[Reading
         "provider": provider,
         "status": "learning" if learning else ("ready" if demand is not None else "no_usage"),
         "learning": learning,
+        "no_readings": no_readings,
         "dry_from": dry_from,
         "dry_until": dry_until,
         "demand_tokens_per_hour": round(current) if current is not None else None,

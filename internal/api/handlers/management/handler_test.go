@@ -11,14 +11,17 @@ import (
 	"github.com/router-for-me/CLIProxyAPI/v8/internal/pluginhost"
 )
 
-func TestAuthenticateManagementKey_LocalhostIPBan_BlocksCorrectKeyDuringBan(t *testing.T) {
+// Failed logins from this machine never lock the panel out. The panel's own
+// retries of a stale saved key used to trip the five-failure ban and block the
+// correct key for half an hour.
+func TestAuthenticateManagementKey_LocalClientNeverBanned(t *testing.T) {
 	h := &Handler{
 		cfg:            &config.Config{},
 		failedAttempts: make(map[string]*attemptInfo),
 		envSecret:      "test-secret",
 	}
 
-	for i := 0; i < 5; i++ {
+	for i := 0; i < 10; i++ {
 		allowed, statusCode, errMsg := h.AuthenticateManagementKey("127.0.0.1", true, "wrong-secret")
 		if allowed {
 			t.Fatalf("expected auth to be denied at attempt %d", i+1)
@@ -28,7 +31,26 @@ func TestAuthenticateManagementKey_LocalhostIPBan_BlocksCorrectKeyDuringBan(t *t
 		}
 	}
 
-	allowed, statusCode, errMsg := h.AuthenticateManagementKey("127.0.0.1", true, "test-secret")
+	if allowed, statusCode, errMsg := h.AuthenticateManagementKey("127.0.0.1", true, "test-secret"); !allowed {
+		t.Fatalf("expected the correct key to work after failed attempts: status=%d msg=%q", statusCode, errMsg)
+	}
+}
+
+func TestAuthenticateManagementKey_RemoteIPBan_BlocksCorrectKeyDuringBan(t *testing.T) {
+	h := &Handler{
+		cfg:                 &config.Config{},
+		failedAttempts:      make(map[string]*attemptInfo),
+		envSecret:           "test-secret",
+		allowRemoteOverride: true,
+	}
+
+	for i := 0; i < 5; i++ {
+		if allowed, _, _ := h.AuthenticateManagementKey("203.0.113.7", false, "wrong-secret"); allowed {
+			t.Fatalf("expected auth to be denied at attempt %d", i+1)
+		}
+	}
+
+	allowed, statusCode, errMsg := h.AuthenticateManagementKey("203.0.113.7", false, "test-secret")
 	if allowed {
 		t.Fatalf("expected correct key to be denied while banned")
 	}

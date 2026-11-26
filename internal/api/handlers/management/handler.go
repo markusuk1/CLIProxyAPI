@@ -399,6 +399,12 @@ func (h *Handler) AuthenticateManagementKey(clientIP string, localClient bool, p
 	}
 
 	fail := func() {
+		// Local clients are never banned: anything on this machine can read the
+		// key anyway, and the panel's own retries of a stale saved key used to
+		// lock the correct key out for half an hour.
+		if localClient {
+			return
+		}
 		h.attemptsMu.Lock()
 		aip := h.failedAttempts[clientIP]
 		if aip == nil {
